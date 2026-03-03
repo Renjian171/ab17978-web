@@ -83,7 +83,7 @@ WSGI_APPLICATION = "myweb2.wsgi.application"
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.mysql",  # 数据库引擎（固定值）
-        "NAME": "antimicrobial_peptides_db",  # 数据库名（之前创建的库）
+        "NAME": "amp_db",  # 数据库名（之前创建的库）
         "USER": "root",  # MySQL用户名（如root）
         "PASSWORD": "",  # MySQL密码（如你的数据库密码）
         "HOST": "localhost",  # 数据库地址（本地用localhost）
