@@ -18,7 +18,9 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from web.views import AntimicrobialPeptideViewSet
+
+# 1. 这里修改：把 run_blast 一并导入进来
+from web.views import AntimicrobialPeptideViewSet, run_blast
 
 # 注册视图集路由
 router = DefaultRouter()
@@ -29,4 +31,6 @@ router.register(
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/", include(router.urls)),  # API接口根路径：/api/
+    # 2. 这里修改：新增 BLAST 的 API 路由
+    path("api/blast/run/", run_blast, name="run-blast"),
 ]

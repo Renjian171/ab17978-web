@@ -7,6 +7,10 @@ import math
 from .models import AmpData
 from .serializers import AntimicrobialPeptideSerializer
 from .pagination import CustomPageNumberPagination
+import os
+import subprocess
+from django.conf import settings
+from rest_framework.decorators import api_view
 
 
 class AntimicrobialPeptideViewSet(viewsets.ReadOnlyModelViewSet):
@@ -230,3 +234,107 @@ class AntimicrobialPeptideViewSet(viewsets.ReadOnlyModelViewSet):
         ]
         result = [{"name": k, "value": v} for k, v in sorted_acts]
         return Response(result)
+
+
+@api_view(["POST"])
+def run_blast(request):
+    """
+    接收前端参数，运行本地 BLAST 引擎并返回结果
+    """
+    # 1. 接收前端传来的参数
+    program = request.data.get("program", "blastp")
+    database = request.data.get("database", "all")
+    evalue = request.data.get("evalue", "0.05")
+    matrix = request.data.get("matrix", "BLOSUM62")
+
+    sequence_text = request.data.get("sequence", "")
+    uploaded_file = request.FILES.get("file", None)
+
+    # 2. 定义临时文件存放路径 (为了安全和整洁，放在项目根目录的 data 文件夹下)
+    # 请确保你的 Django 项目根目录下有一个名为 'data' 的文件夹！
+    temp_dir = os.path.join(settings.BASE_DIR, "data")
+    if not os.path.exists(temp_dir):
+        os.makedirs(temp_dir)
+
+    temp_query_path = os.path.join(temp_dir, "temp_query.fasta")
+
+    try:
+        # 3. 处理输入数据，将其保存为临时 FASTA 文件
+        if uploaded_file:
+            with open(temp_query_path, "wb+") as f:
+                for chunk in uploaded_file.chunks():
+                    f.write(chunk)
+        elif sequence_text:
+            with open(temp_query_path, "w", encoding="utf-8") as f:
+                # 检查用户输入是否包含 '>' (FASTA 头)，如果没有则自动补齐
+                if not sequence_text.strip().startswith(">"):
+                    f.write(">User_Query\n")
+                f.write(sequence_text)
+        else:
+            return Response(
+                {"error": "未提供序列文本或文件 (No sequence or file provided)."},
+                status=400,
+            )
+
+        # 在 run_blast 函数中找到这里并替换
+
+        # 4. 指定本地 BLAST 数据库路径
+        db_path = os.path.join(temp_dir, "amp_db")
+
+        # 获取 blastp.exe 的绝对路径 (请确保这里的路径是你电脑上的真实路径)
+        blast_bin_dir = r"D:\NCBI-blast\blast-2.17.0+\bin"
+        exe_name = f"{program}.exe" if os.name == "nt" else program
+        exe_path = os.path.join(blast_bin_dir, exe_name)
+
+        # 5. 构造命令行指令
+        # 核心改动：增加 -outfmt 6 并指定具体需要的列
+        # qseqid: 查询序列ID
+        # sseqid: 目标序列ID (数据库里的AMP_ID)
+        # pident: 相似度百分比 (Identity)
+        # length: 匹配长度
+        # mismatch: 错配数
+        # gapopen: gap数
+        # qstart, qend: query起始和结束位置
+        # sstart, send: subject起始和结束位置
+        # evalue: E值
+        # bitscore: 得分
+        cmd = [
+            exe_path,
+            "-query",
+            temp_query_path,
+            "-db",
+            db_path,
+            "-evalue",
+            str(evalue),
+            "-matrix",
+            matrix,
+            "-outfmt",
+            "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore qseq sseq",
+        ]
+
+        # 6. 执行命令并捕获输出结果
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+
+        if result.returncode != 0:
+            return Response(
+                {
+                    "error": "BLAST 执行失败 (Execution failed).",
+                    "details": result.stderr,
+                },
+                status=500,
+            )
+
+        # 7. 此时的 result.stdout 是一个由 Tab (\t) 分隔的文本字符串
+        blast_output = result.stdout
+        return Response({"result": blast_output})
+
+    except Exception as e:
+        return Response(
+            {"error": "服务器内部错误 (Internal Server Error)", "details": str(e)},
+            status=500,
+        )
+
+    finally:
+        # 8. 无论成功失败，都清理掉刚才生成的临时输入文件
+        if os.path.exists(temp_query_path):
+            os.remove(temp_query_path)
