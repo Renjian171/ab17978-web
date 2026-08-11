@@ -1,340 +1,625 @@
-from rest_framework import viewsets, filters
-from rest_framework.decorators import action
-from rest_framework.response import Response
-from django.db.models import Count, Q  # 必须导入 Q 对象用于组合查询
-import math
-
-from .models import AmpData
-from .serializers import AntimicrobialPeptideSerializer
-from .pagination import CustomPageNumberPagination
 import os
+import re
+import tempfile
+import mimetypes
 import subprocess
 from django.conf import settings
-from rest_framework.decorators import api_view
+from django.http import FileResponse, JsonResponse, HttpResponse
+from django.db.models import Count
+from rest_framework import viewsets, filters
+from rest_framework.decorators import action, api_view
+from rest_framework.response import Response
 
+from .models import SequenceData, PromoterData, OperonData, SrnaStructure
+from .serializers import (
+    AntimicrobialPeptideSerializer,
+    PromoterSerializer,
+    OperonSerializer,
+    SrnaStructureSerializer,
+)
+from .pagination import CustomPageNumberPagination
+from .genome_data import (
+    get_tree_json, get_all_genome_stats, get_genes_data,
+    search_genes, get_gene_context, get_region_features,
+    TREE_FILE,
+)
+
+# ============================================================
+#  基础路径配置 (推荐在 Django settings.py 中定义，此处设默认备选值)
+# ============================================================
+BASE_DATA_DIR = getattr(settings, 'BACTERIA_DATA_DIR', r"C:\Users\ymh\Desktop\bacteria")
+
+GENOME_DB_PATH = getattr(settings, 'GENOME_DB_PATH', os.path.join(BASE_DATA_DIR, "GENOME_DB"))
+BLAST_DIR = getattr(settings, 'BLAST_DIR', os.path.join(BASE_DATA_DIR, "BLAST_DB"))
+BLAST_DB = getattr(settings, 'BLAST_DB', os.path.join(BLAST_DIR, "ab17978_db"))
+BLAST_BIN = getattr(settings, 'BLAST_BIN', r"D:\NCBI-blast\blast-2.17.0+\bin\blastp.exe")
+
+STRUCTURE_DIR = os.path.join(BASE_DATA_DIR, "extracted_cif_all")
+GFF3_FILE = os.path.join(BASE_DATA_DIR, "final_merged_annotation.gff3")
+GENOME_FNA = os.path.join(BASE_DATA_DIR, "Ab17978.fna")
+SRNA_PNG_DIR = os.path.join(BASE_DATA_DIR, "rna_structure", "structure_png")
+
+
+# ============================================================
+#  模型视图集 (DRF ViewSets)
+# ============================================================
 
 class AntimicrobialPeptideViewSet(viewsets.ReadOnlyModelViewSet):
     """
-    抗菌肽数据接口：支持多维度筛选与统计
+    Ab17978 菌序列数据接口：支持筛选与统计
     """
-
-    queryset = AmpData.objects.all().order_by("amp_id")
+    queryset = SequenceData.objects.all().order_by("seq_id")
     serializer_class = AntimicrobialPeptideSerializer
     pagination_class = CustomPageNumberPagination
-
     filter_backends = [filters.SearchFilter]
-    search_fields = ["amp_id", "name", "sequence", "activity", "source"]
+    search_fields = ["seq_id", "description", "sequence"]
 
-    # ============================================================
-    #  核心筛选逻辑 (修改重点)
-    # ============================================================
     def get_queryset(self):
         """
-        处理前端 AdvancedSearch.vue 发来的所有筛选参数
+        处理前端发来的筛选参数
         """
-        queryset = AmpData.objects.all().order_by("amp_id")
+        queryset = super().get_queryset()
         params = self.request.query_params
 
-        # --- 1. 文本模糊搜索 ---
+        # Seq ID 精确搜索
+        seq_id = params.get("seq_id")
+        if seq_id:
+            queryset = queryset.filter(seq_id__iexact=seq_id.strip())
 
-        # ID 精确搜索
-        if params.get("apd_id"):
-            queryset = queryset.filter(amp_id__iexact=params.get("apd_id"))
+        # Description 模糊搜索
+        description = params.get("description")
+        if description:
+            queryset = queryset.filter(description__icontains=description.strip())
 
-        # 名称/分类 (混合搜索 Name, Family, Gene)
-        if params.get("name_class"):
-            v = params.get("name_class")
-            queryset = queryset.filter(
-                Q(name__icontains=v) | Q(family__icontains=v) | Q(gene__icontains=v)
-            )
+        # 序列模糊搜索
+        sequence = params.get("sequence")
+        if sequence:
+            queryset = queryset.filter(sequence__icontains=sequence.strip())
 
-        # 来源
-        if params.get("source"):
-            queryset = queryset.filter(source__icontains=params.get("source"))
+        # 序列长度范围
+        seq_length_min = params.get("seq_length_min")
+        if seq_length_min and seq_length_min.isdigit():
+            queryset = queryset.filter(seq_length__gte=int(seq_length_min))
 
-        # 活性 (新增)
-        if params.get("activity"):
-            queryset = queryset.filter(activity__icontains=params.get("activity"))
-
-        # 靶标对象 (新增)
-        if params.get("target_objects"):
-            queryset = queryset.filter(
-                target_objects__icontains=params.get("target_objects")
-            )
-
-        # 序列
-        if params.get("sequence"):
-            queryset = queryset.filter(sequence__icontains=params.get("sequence"))
-
-        # --- 2. 数值范围搜索 ---
-
-        # 长度 (Length)
-        if params.get("length_min"):
-            queryset = queryset.filter(length__gte=params.get("length_min"))
-        if params.get("length_max"):
-            queryset = queryset.filter(length__lte=params.get("length_max"))
-
-        # 分子量 (Mass) - 新增
-        if params.get("mass_min"):
-            queryset = queryset.filter(mass__gte=params.get("mass_min"))
-        if params.get("mass_max"):
-            queryset = queryset.filter(mass__lte=params.get("mass_max"))
-
-        # 等电点 (pI) - 新增
-        if params.get("pi_min"):
-            queryset = queryset.filter(pi__gte=params.get("pi_min"))
-        if params.get("pi_max"):
-            queryset = queryset.filter(pi__lte=params.get("pi_max"))
-
-        # 疏水性 (Hydrophobicity)
-        if params.get("hydro_min"):
-            queryset = queryset.filter(hydrophobicity__gte=params.get("hydro_min"))
-        if params.get("hydro_max"):
-            queryset = queryset.filter(hydrophobicity__lte=params.get("hydro_max"))
-
-        # 博曼指数 (Boman Index) - 新增
-        if params.get("boman_min"):
-            queryset = queryset.filter(boman_index__gte=params.get("boman_min"))
-        if params.get("boman_max"):
-            queryset = queryset.filter(boman_index__lte=params.get("boman_max"))
+        seq_length_max = params.get("seq_length_max")
+        if seq_length_max and seq_length_max.isdigit():
+            queryset = queryset.filter(seq_length__lte=int(seq_length_max))
 
         return queryset
 
-    # ============================================================
-    #  统计接口 (保持原有逻辑，整理缩进)
-    # ============================================================
-
-    # --- 1. 长度分布 ---
     @action(detail=False, methods=["get"])
     def length_stats(self, request):
+        """序列长度分布统计"""
         db_stats = (
-            AmpData.objects.values("length")
-            .annotate(count=Count("amp_id"))
-            .order_by("length")
+            SequenceData.objects.values("seq_length")
+            .annotate(count=Count("id"))
+            .order_by("seq_length")
         )
         if not db_stats:
             return Response([])
 
         stats_dict = {
-            item["length"]: item["count"] for item in db_stats if item["length"]
+            item["seq_length"]: item["count"]
+            for item in db_stats
+            if item["seq_length"] is not None
         }
-        lengths = [k for k in stats_dict.keys()]
-        if not lengths:
+        
+        if not stats_dict:
             return Response([])
 
-        max_len = max(lengths)
-        continuous_stats = []
-        for l in range(1, max_len + 1):
-            continuous_stats.append({"length": l, "count": stats_dict.get(l, 0)})
+        max_len = max(stats_dict.keys())
+        continuous_stats = [
+            {"length": l, "count": stats_dict.get(l, 0)}
+            for l in range(1, max_len + 1)
+        ]
         return Response(continuous_stats)
 
-    # --- 2. 疏水性分布 ---
-    @action(detail=False, methods=["get"])
-    def hydro_stats(self, request):
-        values = AmpData.objects.exclude(hydrophobicity__isnull=True).values_list(
-            "hydrophobicity", flat=True
-        )
-        raw_bins = {}
-        min_val, max_val = 0.0, 0.0
-        has_data = False
 
-        for val in values:
-            try:
-                v = float(val)
-                has_data = True
-                floor_val = math.floor(v * 10) / 10.0
-                key = f"{floor_val:.1f}"
-                raw_bins[key] = raw_bins.get(key, 0) + 1
-                if v < min_val:
-                    min_val = v
-                if v > max_val:
-                    max_val = v
-            except:
+class PromoterViewSet(viewsets.ReadOnlyModelViewSet):
+    """启动子活性数据接口"""
+    queryset = PromoterData.objects.all().order_by("-mean_tpm_global")
+    serializer_class = PromoterSerializer
+    pagination_class = CustomPageNumberPagination
+    filter_backends = [filters.SearchFilter]
+    search_fields = ["gene_id"]
+
+
+class OperonViewSet(viewsets.ReadOnlyModelViewSet):
+    """操纵子分类数据接口"""
+    queryset = OperonData.objects.all().order_by("id")
+    serializer_class = OperonSerializer
+    pagination_class = CustomPageNumberPagination
+    filter_backends = [filters.SearchFilter]
+    search_fields = ["classification", "rockhopper_range", "genes"]
+
+
+class SrnaStructureViewSet(viewsets.ReadOnlyModelViewSet):
+    """sRNA结构数据接口"""
+    queryset = SrnaStructure.objects.all().order_by("name")
+    serializer_class = SrnaStructureSerializer
+    pagination_class = CustomPageNumberPagination
+    filter_backends = [filters.SearchFilter]
+    search_fields = ["name"]
+
+
+# ============================================================
+#  Genome API endpoints
+# ============================================================
+
+@api_view(["GET"])
+def genome_tree(request):
+    """Return the Newick tree parsed as ECharts-compatible JSON."""
+    tree = get_tree_json()
+    return Response(tree)
+
+
+@api_view(["GET"])
+def genome_tree_newick(request):
+    """Return the raw Newick tree string (for Phylocanvas.gl)."""
+    if not os.path.isfile(TREE_FILE):
+        return JsonResponse({"error": "Tree file not found"}, status=404)
+    with open(TREE_FILE, "r", encoding="utf-8") as f:
+        newick = f.read().strip()
+    return HttpResponse(newick, content_type="text/plain; charset=utf-8")
+
+
+@api_view(["GET"])
+def genome_list(request):
+    """Return genome statistics for all .fna files."""
+    stats = get_all_genome_stats()
+    return Response(stats)
+
+
+# ============================================================
+#  Download API endpoints
+# ============================================================
+
+@api_view(["GET"])
+def download_list(request):
+    """List all downloadable genome files with metadata."""
+    files = []
+    if not os.path.exists(GENOME_DB_PATH):
+        return Response(files)
+
+    for fname in sorted(os.listdir(GENOME_DB_PATH)):
+        fpath = os.path.join(GENOME_DB_PATH, fname)
+
+        if fname.endswith(".zip") and os.path.isfile(fpath):
+            stem = fname[:-4]
+            ext = "zip"
+            if stem.startswith("A. "):
+                genus = "Acinetobacter"
+            elif stem.startswith("P. "):
+                genus = "Pseudomonas"
+            else:
+                genus = "Other"
+            files.append({
+                "filename": fname,
+                "stem": stem,
+                "extension": ext,
+                "genus": genus,
+            })
+        elif os.path.isdir(fpath) and fname == "Phylogenetic_Tree":
+            for tf in sorted(os.listdir(fpath)):
+                if tf.endswith(".zip"):
+                    files.append({
+                        "filename": "Phylogenetic_Tree/" + tf,
+                        "stem": "GTDB-Tk Phylogenetic Tree (Newick)",
+                        "extension": "zip",
+                        "genus": "Other",
+                    })
+
+    return Response(files)
+
+
+@api_view(["GET"])
+def download_file(request):
+    """Download a specific genome file. Accepts ?file=<filename> query param."""
+    filename = request.GET.get("file", "").strip()
+    if not filename:
+        return JsonResponse({"error": "Missing 'file' parameter"}, status=400)
+
+    # 安全检查：防止路径遍历攻击 (Path Traversal)
+    fpath = os.path.join(GENOME_DB_PATH, filename.replace("/", os.sep))
+    fpath = os.path.realpath(fpath)
+    base_real = os.path.realpath(GENOME_DB_PATH) + os.sep
+    if not fpath.startswith(base_real):
+        return JsonResponse({"error": "Invalid filename"}, status=400)
+    
+    # 二级路径越界核查
+    real_path = os.path.realpath(fpath)
+    real_base = os.path.realpath(GENOME_DB_PATH)
+    if not real_path.startswith(real_base + os.sep) and real_path != real_base:
+        return JsonResponse({"error": "Access denied"}, status=400)
+
+    if not os.path.isfile(fpath):
+        return JsonResponse({"error": "File not found"}, status=404)
+
+    content_type, _ = mimetypes.guess_type(fpath)
+    response = FileResponse(open(fpath, "rb"), content_type=content_type or "application/octet-stream")
+    download_name = os.path.basename(fpath)
+    response["Content-Disposition"] = f'attachment; filename="{download_name}"'
+    return response
+
+
+# ============================================================
+#  Genes API endpoint
+# ============================================================
+
+@api_view(["GET"])
+def genes_data(request):
+    """Return Ab17978 genome annotation data for visualization."""
+    data = get_genes_data()
+    return Response(data)
+
+
+@api_view(["GET"])
+def genes_search(request):
+    """Search genes by keyword (locus_tag, gene name, product)."""
+    query = request.GET.get("q", "").strip()
+    if not query:
+        return Response([])
+    results = search_genes(query)
+    return Response(results)
+
+
+@api_view(["GET"])
+def genes_context(request):
+    """Get genomic context around a specific gene."""
+    locus_tag = request.GET.get("locus_tag", "").strip()
+    replicon = request.GET.get("replicon", None)
+    
+    try:
+        radius = int(request.GET.get("radius", 5000))
+    except ValueError:
+        radius = 5000
+
+    if not locus_tag:
+        return JsonResponse({"error": "Missing locus_tag parameter"}, status=400)
+    
+    data = get_gene_context(locus_tag, replicon, radius)
+    return Response(data)
+
+
+@api_view(["GET"])
+def genes_region(request):
+    """Query features in an arbitrary genomic region (for IGV dynamic loading)."""
+    replicon = request.GET.get("replicon", "").strip()
+    start = request.GET.get("start", "0").strip()
+    end = request.GET.get("end", "0").strip()
+
+    if not replicon or not start or not end:
+        return JsonResponse({"error": "Missing replicon, start, or end parameter"}, status=400)
+
+    try:
+        start_int = int(start)
+        end_int = int(end)
+    except ValueError:
+        return JsonResponse({"error": "Start and end must be integers"}, status=400)
+
+    data = get_region_features(replicon, start_int, end_int)
+    return Response(data)
+
+
+# ============================================================
+#  Structure & DNA Data Loaders
+# ============================================================
+
+_gene_coords = None
+_genome_seqs = None
+
+
+def _load_gff3():
+    """Parse GFF3 and build locus_tag -> {seqid, start, end, strand} mapping."""
+    global _gene_coords
+    if _gene_coords is not None:
+        return _gene_coords
+
+    _gene_coords = {}
+    if not os.path.isfile(GFF3_FILE):
+        return _gene_coords
+
+    with open(GFF3_FILE, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            cols = line.split("\t")
+            if len(cols) < 9 or cols[2] != "CDS":
                 continue
 
-        if not has_data:
-            return Response([])
+            seqid = cols[0]
+            try:
+                start = int(cols[3])
+                end = int(cols[4])
+            except ValueError:
+                continue
 
-        start = math.floor(min_val * 10)
-        end = math.ceil(max_val * 10)
-        result = []
-        for i in range(start, end + 1):
-            current_val = i / 10.0
-            key_str = f"{current_val:.1f}"
-            next_val = (i + 1) / 10.0
-            result.append(
-                {
-                    "range": f"{current_val:.1f} ~ {next_val:.1f}",
-                    "count": raw_bins.get(key_str, 0),
+            strand = cols[6]
+            attrs = "\t".join(cols[8:])
+            
+            locus = ""
+            for part in attrs.split(";"):
+                if part.startswith("locus_tag="):
+                    locus = part.split("=", 1)[1].strip()
+                    break
+
+            if locus:
+                _gene_coords[locus] = {
+                    "seqid": seqid,
+                    "start": start,
+                    "end": end,
+                    "strand": strand,
                 }
-            )
-        return Response(result)
+    return _gene_coords
 
-    # --- 3. 来源分布 ---
-    @action(detail=False, methods=["get"])
-    def source_stats(self, request):
-        db_stats = (
-            AmpData.objects.values("source")
-            .annotate(count=Count("amp_id"))
-            .order_by("-count")[:10]
-        )
-        return Response(db_stats)
 
-    # --- 4. 分子量分布 (Mass) ---
-    @action(detail=False, methods=["get"])
-    def mass_stats(self, request):
-        values = AmpData.objects.exclude(mass__isnull=True).values_list(
-            "mass", flat=True
-        )
-        bins = {}
-        for val in values:
-            try:
-                v = float(val)
-                bin_start = int(v // 500) * 500
-                bins[bin_start] = bins.get(bin_start, 0) + 1
-            except:
-                continue
-        sorted_keys = sorted(bins.keys())
-        result = [{"range": f"{k}-{k+500}", "count": bins[k]} for k in sorted_keys]
-        return Response(result)
+def _load_genome():
+    """Load genome FASTA into a dict keyed by seqid."""
+    global _genome_seqs
+    if _genome_seqs is not None:
+        return _genome_seqs
 
-    # --- 5. 等电点分布 (pI) ---
-    @action(detail=False, methods=["get"])
-    def pi_stats(self, request):
-        values = AmpData.objects.exclude(pi__isnull=True).values_list("pi", flat=True)
-        bins = {}
-        for val in values:
-            try:
-                v = float(val)
-                bin_start = int(v)
-                bins[bin_start] = bins.get(bin_start, 0) + 1
-            except:
-                continue
-        sorted_keys = sorted(bins.keys())
-        result = [{"range": f"{k}-{k+1}", "count": bins[k]} for k in sorted_keys]
-        return Response(result)
+    _genome_seqs = {}
+    if not os.path.isfile(GENOME_FNA):
+        return _genome_seqs
 
-    # --- 6. 活性分布 (Activity) ---
-    @action(detail=False, methods=["get"])
-    def activity_stats(self, request):
-        all_activities = AmpData.objects.exclude(activity__isnull=True).values_list(
-            "activity", flat=True
-        )
-        activity_counts = {}
-        for act_str in all_activities:
-            if not act_str:
-                continue
-            parts = [x.strip() for x in act_str.replace(";", ",").split(",")]
-            for p in parts:
-                if p:
-                    p = p.capitalize()
-                    activity_counts[p] = activity_counts.get(p, 0) + 1
-        sorted_acts = sorted(activity_counts.items(), key=lambda x: x[1], reverse=True)[
-            :10
-        ]
-        result = [{"name": k, "value": v} for k, v in sorted_acts]
-        return Response(result)
+    current_id = None
+    current_seq = []
+    with open(GENOME_FNA, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith(">"):
+                if current_id:
+                    _genome_seqs[current_id] = "".join(current_seq)
+                current_id = line[1:].split()[0]
+                current_seq = []
+            else:
+                current_seq.append(line.upper())
+
+        if current_id:
+            _genome_seqs[current_id] = "".join(current_seq)
+
+    return _genome_seqs
+
+
+@api_view(["GET"])
+def gene_dna_sequence(request):
+    """Return the DNA sequence for a given locus_tag."""
+    locus_tag = request.GET.get("locus_tag", "").strip()
+    if not locus_tag:
+        return JsonResponse({"error": "Missing locus_tag"}, status=400)
+
+    coords = _load_gff3()
+    genome = _load_genome()
+
+    if locus_tag not in coords:
+        return JsonResponse({"error": f"Locus tag not found: {locus_tag}"}, status=404)
+
+    coord = coords[locus_tag]
+    seqid = coord["seqid"]
+
+    if seqid not in genome:
+        return JsonResponse({"error": f"Sequence not found for: {seqid}"}, status=404)
+
+    seq = genome[seqid]
+    start = coord["start"] - 1
+    end = coord["end"]
+    dna = seq[start:end]
+
+    if coord["strand"] == "-":
+        comp = str.maketrans("ATCGNRYKMSWBDHV", "TAGCNRYMKWSVHDB")
+        dna = dna.translate(comp)[::-1]
+
+    return JsonResponse({
+        "locus_tag": locus_tag,
+        "seqid": seqid,
+        "start": coord["start"],
+        "end": coord["end"],
+        "strand": coord["strand"],
+        "length": len(dna),
+        "sequence": dna,
+    })
 
 
 @api_view(["POST"])
-def run_blast(request):
-    """
-    接收前端参数，运行本地 BLAST 引擎并返回结果
-    """
-    # 1. 接收前端传来的参数
-    program = request.data.get("program", "blastp")
-    database = request.data.get("database", "all")
-    evalue = request.data.get("evalue", "0.05")
-    matrix = request.data.get("matrix", "BLOSUM62")
+def primer_design(request):
+    """Design PCR primers using Primer3."""
+    import primer3
 
-    sequence_text = request.data.get("sequence", "")
-    uploaded_file = request.FILES.get("file", None)
+    sequence = (request.data.get("sequence", "") or "").strip()
+    if not sequence or len(sequence) < 36:
+        return JsonResponse({"error": "Sequence too short (min 36 bp required)"}, status=400)
 
-    # 2. 定义临时文件存放路径 (为了安全和整洁，放在项目根目录的 data 文件夹下)
-    # 请确保你的 Django 项目根目录下有一个名为 'data' 的文件夹！
-    temp_dir = os.path.join(settings.BASE_DIR, "data")
-    if not os.path.exists(temp_dir):
-        os.makedirs(temp_dir)
-
-    temp_query_path = os.path.join(temp_dir, "temp_query.fasta")
+    # 格式化并校验 DNA 序列
+    seq = sequence.upper().replace("\n", "").replace(" ", "")
+    if not re.match(r'^[ATCGNRYKMSWBDHV]+$', seq):
+        return JsonResponse({"error": "Sequence contains invalid characters"}, status=400)
 
     try:
-        # 3. 处理输入数据，将其保存为临时 FASTA 文件
-        if uploaded_file:
-            with open(temp_query_path, "wb+") as f:
-                for chunk in uploaded_file.chunks():
-                    f.write(chunk)
-        elif sequence_text:
-            with open(temp_query_path, "w", encoding="utf-8") as f:
-                # 检查用户输入是否包含 '>' (FASTA 头)，如果没有则自动补齐
-                if not sequence_text.strip().startswith(">"):
-                    f.write(">User_Query\n")
-                f.write(sequence_text)
+        p_min_size = int(request.data.get("primer_min_size", 18))
+        p_max_size = int(request.data.get("primer_max_size", 25))
+        p_opt_size = int(request.data.get("primer_opt_size", 20))
+        prod_min = int(request.data.get("product_min", 80))
+        prod_max = int(request.data.get("product_max", 1000))
+    except ValueError:
+        return JsonResponse({"error": "Invalid numerical parameters"}, status=400)
+
+    params = {
+        "PRIMER_NUM_RETURN": 10,
+        "PRIMER_MIN_SIZE": p_min_size,
+        "PRIMER_MAX_SIZE": p_max_size,
+        "PRIMER_OPT_SIZE": p_opt_size,
+        "PRIMER_MIN_TM": float(request.data.get("primer_min_tm", 55.0)),
+        "PRIMER_MAX_TM": float(request.data.get("primer_max_tm", 65.0)),
+        "PRIMER_OPT_TM": float(request.data.get("primer_opt_tm", 60.0)),
+        "PRIMER_MIN_GC": float(request.data.get("primer_min_gc", 40.0)),
+        "PRIMER_MAX_GC": float(request.data.get("primer_max_gc", 60.0)),
+        "PRIMER_PRODUCT_SIZE_RANGE": [[prod_min, prod_max]],
+        "PRIMER_MAX_POLY_X": 4,
+        "PRIMER_GC_CLAMP": 1,
+    }
+
+    try:
+        # 新版/旧版 Primer3 接口适配兼容
+        design_func = getattr(primer3, 'design_primers', None) or getattr(primer3.bindings, 'design_primers', None)
+        if not design_func:
+            return JsonResponse({"error": "Primer3 bindings not found"}, status=500)
+
+        result = design_func(
+            {"SEQUENCE_ID": "template", "SEQUENCE_TEMPLATE": seq},
+            params,
+        )
+    except Exception as e:
+        return JsonResponse({"error": f"Primer3 calculation failed: {str(e)}"}, status=500)
+
+    num_returned = result.get("PRIMER_PAIR_NUM_RETURNED", 0)
+    pairs = []
+    for i in range(num_returned):
+        # 兼容 PRIMER_LEFT_i 是列表/元组 (start, length) 或者直接数值的情况
+        left_info = result.get(f"PRIMER_LEFT_{i}")
+        right_info = result.get(f"PRIMER_RIGHT_{i}")
+        fwd_len = left_info[1] if isinstance(left_info, (list, tuple)) else left_info
+        rev_len = right_info[1] if isinstance(right_info, (list, tuple)) else right_info
+
+        pairs.append({
+            "rank": i + 1,
+            "fwd_seq": result.get(f"PRIMER_LEFT_{i}_SEQUENCE", ""),
+            "fwd_len": fwd_len,
+            "fwd_tm": round(result.get(f"PRIMER_LEFT_{i}_TM", 0), 1),
+            "fwd_gc": round(result.get(f"PRIMER_LEFT_{i}_GC_PERCENT", 0), 1),
+            "rev_seq": result.get(f"PRIMER_RIGHT_{i}_SEQUENCE", ""),
+            "rev_len": rev_len,
+            "rev_tm": round(result.get(f"PRIMER_RIGHT_{i}_TM", 0), 1),
+            "rev_gc": round(result.get(f"PRIMER_RIGHT_{i}_GC_PERCENT", 0), 1),
+            "product_size": result.get(f"PRIMER_PAIR_{i}_PRODUCT_SIZE", 0),
+            "penalty": round(result.get(f"PRIMER_PAIR_{i}_PENALTY", 0), 2),
+        })
+
+    return JsonResponse({"pairs": pairs, "num_returned": num_returned})
+
+
+@api_view(["GET"])
+def gene_structure(request):
+    """Check if a structure file exists for the given locus_tag, and return its content."""
+    locus_tag = request.GET.get("locus_tag", "").strip()
+    if not locus_tag:
+        return JsonResponse({"error": "Missing locus_tag"}, status=400)
+
+    # 过滤非标准字符，防止文件名注入
+    safe_locus = re.sub(r'[^a-zA-Z0-9_\-]', '', locus_tag)
+
+    if not os.path.isdir(STRUCTURE_DIR):
+        return JsonResponse({"found": False, "reason": "Structure directory not found"})
+
+    for fname in os.listdir(STRUCTURE_DIR):
+        if fname.startswith(safe_locus + "_") and (fname.endswith(".cif") or fname.endswith(".pdb")):
+            fpath = os.path.join(STRUCTURE_DIR, fname)
+            try:
+                with open(fpath, "r", encoding="utf-8", errors="ignore") as f:
+                    content = f.read()
+            except Exception as e:
+                return JsonResponse({"found": False, "reason": f"Failed to read file: {str(e)}"})
+
+            ext = os.path.splitext(fname)[1].lower()
+            return JsonResponse({
+                "found": True,
+                "filename": fname,
+                "format": ext.lstrip("."),
+                "content": content,
+            })
+
+    return JsonResponse({"found": False, "reason": "No structure file"})
+
+
+@api_view(["GET"])
+def srna_structure_image(request):
+    """Serve sRNA structure PNG image files."""
+    name = request.GET.get("name", "").strip()
+    stype = request.GET.get("type", "ss").strip()  # ss or dp
+    
+    if not name:
+        return JsonResponse({"error": "Missing name"}, status=400)
+
+    # 路径安全净化
+    safe_name = os.path.basename(name)
+    safe_stype = os.path.basename(stype)
+
+    fname = f"{safe_name}_{safe_stype}.png"
+    fpath = os.path.join(SRNA_PNG_DIR, fname)
+
+    if not os.path.isfile(fpath):
+        return JsonResponse({"error": "Image not found"}, status=404)
+
+    return FileResponse(open(fpath, "rb"), content_type="image/png")
+
+
+# ============================================================
+#  BLAST API endpoint
+# ============================================================
+
+@api_view(["POST"])
+def blast_run(request):
+    """Run BLASTP against the Ab17978 sequence database."""
+    sequence = request.data.get("sequence", "").strip()
+    uploaded_file = request.FILES.get("file")
+
+    query_fasta = ""
+    if uploaded_file:
+        try:
+            query_fasta = uploaded_file.read().decode("utf-8", errors="ignore")
+        except Exception as e:
+            return JsonResponse({"error": f"无法读取上传文件: {str(e)}"}, status=400)
+    elif sequence:
+        if not sequence.startswith(">"):
+            query_fasta = f">User_Query\n{sequence}"
         else:
-            return Response(
-                {"error": "未提供序列文本或文件 (No sequence or file provided)."},
-                status=400,
-            )
+            query_fasta = sequence
+    else:
+        return JsonResponse({"error": "请提供序列或上传FASTA文件"}, status=400)
 
-        # 在 run_blast 函数中找到这里并替换
+    evalue = str(request.data.get("evalue", "10")).strip()
+    matrix = str(request.data.get("matrix", "BLOSUM62")).strip()
 
-        # 4. 指定本地 BLAST 数据库路径
-        db_path = os.path.join(temp_dir, "amp_db")
+    # 安全检查：限制矩阵只允许合法值，防止命令行参数注入
+    allowed_matrices = ["BLOSUM45", "BLOSUM62", "BLOSUM80", "PAM30", "PAM70"]
+    if matrix.upper() not in allowed_matrices:
+        matrix = "BLOSUM62"
 
-        # 获取 blastp.exe 的绝对路径 (请确保这里的路径是你电脑上的真实路径)
-        blast_bin_dir = r"D:\NCBI-blast\blast-2.17.0+\bin"
-        exe_name = f"{program}.exe" if os.name == "nt" else program
-        exe_path = os.path.join(blast_bin_dir, exe_name)
+    if not os.path.isfile(BLAST_BIN):
+        return JsonResponse({"error": "BLAST+ 未安装或可执行文件路径配置错误"}, status=500)
+    if not os.path.isfile(BLAST_DB + ".pin") and not os.path.isfile(BLAST_DB + ".phr"):
+        return JsonResponse({"error": "BLAST 数据库文件不存在"}, status=500)
 
-        # 5. 构造命令行指令
-        # 核心改动：增加 -outfmt 6 并指定具体需要的列
-        # qseqid: 查询序列ID
-        # sseqid: 目标序列ID (数据库里的AMP_ID)
-        # pident: 相似度百分比 (Identity)
-        # length: 匹配长度
-        # mismatch: 错配数
-        # gapopen: gap数
-        # qstart, qend: query起始和结束位置
-        # sstart, send: subject起始和结束位置
-        # evalue: E值
-        # bitscore: 得分
+    query_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".fasta", delete=False, encoding="utf-8"
+        ) as f:
+            f.write(query_fasta)
+            query_path = f.name
+
         cmd = [
-            exe_path,
-            "-query",
-            temp_query_path,
-            "-db",
-            db_path,
-            "-evalue",
-            str(evalue),
-            "-matrix",
-            matrix,
-            "-outfmt",
-            "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore qseq sseq",
+            BLAST_BIN,
+            "-query", query_path,
+            "-db", BLAST_DB,
+            "-evalue", evalue,
+            "-matrix", matrix,
+            "-outfmt", "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore qseq sseq",
+            "-num_threads", "4",
         ]
 
-        # 6. 执行命令并捕获输出结果
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
 
         if result.returncode != 0:
-            return Response(
-                {
-                    "error": "BLAST 执行失败 (Execution failed).",
-                    "details": result.stderr,
-                },
-                status=500,
-            )
+            return JsonResponse({"error": result.stderr or "BLAST 运行失败"}, status=500)
 
-        # 7. 此时的 result.stdout 是一个由 Tab (\t) 分隔的文本字符串
-        blast_output = result.stdout
-        return Response({"result": blast_output})
+        return JsonResponse({"result": result.stdout})
 
+    except subprocess.TimeoutExpired:
+        return JsonResponse({"error": "BLAST 比对超时（超过 120 秒）"}, status=500)
     except Exception as e:
-        return Response(
-            {"error": "服务器内部错误 (Internal Server Error)", "details": str(e)},
-            status=500,
-        )
-
+        return JsonResponse({"error": str(e)}, status=500)
     finally:
-        # 8. 无论成功失败，都清理掉刚才生成的临时输入文件
-        if os.path.exists(temp_query_path):
-            os.remove(temp_query_path)
+        if query_path and os.path.exists(query_path):
+            os.unlink(query_path)

@@ -57,7 +57,7 @@ MIDDLEWARE = [
 # 允许所有前端域名访问（开发环境用，生产环境需指定具体域名）
 CORS_ALLOW_ALL_ORIGINS = True
 
-ROOT_URLCONF = "myweb2.urls"
+ROOT_URLCONF = "myweb.urls"
 
 TEMPLATES = [
     {
@@ -74,7 +74,7 @@ TEMPLATES = [
     },
 ]
 
-WSGI_APPLICATION = "myweb2.wsgi.application"
+WSGI_APPLICATION = "myweb.wsgi.application"
 
 
 # Database
@@ -83,7 +83,7 @@ WSGI_APPLICATION = "myweb2.wsgi.application"
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.mysql",  # 数据库引擎（固定值）
-        "NAME": "amp_db",  # 数据库名（之前创建的库）
+        "NAME": "ab17978_db",  # 数据库名（之前创建的库）
         "USER": "root",  # MySQL用户名（如root）
         "PASSWORD": "",  # MySQL密码（如你的数据库密码）
         "HOST": "localhost",  # 数据库地址（本地用localhost）

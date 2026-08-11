@@ -1,11 +1,26 @@
-# web/serializers.py
 from rest_framework import serializers
-from .models import AmpData
+from .models import SequenceData, PromoterData, OperonData, SrnaStructure
 
 
 class AntimicrobialPeptideSerializer(serializers.ModelSerializer):
     class Meta:
-        model = AmpData
-        fields = (
-            "__all__"  # 序列化所有字段（也可指定具体字段，如['apd_id', 'sequence']）
-        )
+        model = SequenceData
+        fields = "__all__"
+
+
+class PromoterSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PromoterData
+        fields = "__all__"
+
+
+class OperonSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = OperonData
+        fields = "__all__"
+
+
+class SrnaStructureSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SrnaStructure
+        fields = "__all__"
