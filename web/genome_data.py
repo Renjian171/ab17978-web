@@ -7,7 +7,7 @@ import os
 from django.conf import settings
 from Bio import Phylo  # 引入权威的 Biopython 树解析库
 
-GENOME_DIR = r"C:\Users\ymh\Desktop\bacteria\GENOME_DB"
+GENOME_DIR = os.path.join(getattr(settings, 'BACTERIA_DATA_DIR', r"C:\Users\ymh\Desktop\bacteria"), "GENOME_DB")
 TREE_FILE = os.path.join(GENOME_DIR, "Phylogenetic_Tree", "gtdbtk.bac120.user_msa.fasta.treefile")
 
 # ============================================================
@@ -563,7 +563,7 @@ def get_all_genome_stats():
 #  Ab17978 Genes Page — GFF3 / BED Parsers
 # ============================================================
 
-AB17978_DIR = r"C:\Users\ymh\Desktop\bacteria"
+AB17978_DIR = getattr(settings, 'BACTERIA_DATA_DIR', r"C:\Users\ymh\Desktop\bacteria")
 
 # File paths
 AB17978_FILES = {
