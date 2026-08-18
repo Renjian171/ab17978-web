@@ -1,0 +1,12 @@
+Django==6.0.6
+djangorestframework==3.17.1
+django-cors-headers==4.9.0
+biopython==1.87
+numpy==1.26.4
+pandas==2.2.2
+pillow==10.4.0
+primer3-py==2.3.0
+requests==2.32.3
+waitress==3.0.2
+gunicorn==23.0.0
+whitenoise==6.9.0
