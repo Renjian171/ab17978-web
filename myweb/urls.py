@@ -28,3 +28,11 @@ urlpatterns = [
     path("api/genes/dna-sequence/", gene_dna_sequence, name="gene-dna-sequence"),
     path("api/primers/design/", primer_design, name="primer-design"),
 ]
+
+from django.urls import re_path
+from django.views.generic import TemplateView
+
+urlpatterns += [
+    # 非 API / 非静态路径全部回退到前端 index.html（Vue history 模式）
+    re_path(r"^(?!api/|admin/|static/).*$", TemplateView.as_view(template_name="index.html")),
+]

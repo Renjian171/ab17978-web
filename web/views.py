@@ -606,7 +606,7 @@ def blast_run(request):
             "-evalue", evalue,
             "-matrix", matrix,
             "-outfmt", "6 qseqid sseqid pident length mismatch gapopen qstart qend sstart send evalue bitscore qseq sseq",
-            "-num_threads", "4",
+            "-num_threads", "1",
         ]
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
