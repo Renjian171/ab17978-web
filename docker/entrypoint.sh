@@ -47,6 +47,10 @@ chmod 777 "$DATA_DIR"
 #    用 conda env 的 python（即 DJANGO_SETTINGS_MODULE=settings_prod）。
 python manage.py migrate --no-input
 
+# 收集 Django 静态文件（主页轮番图 static/web/statistics/*.png 等），
+# whitenoise 从 STATIC_ROOT(staticfiles/) 服务；不跑则 /static/ 全部 404
+python manage.py collectstatic --noinput
+
 # 业务表 schema：直接读镜像内的 /sqlite_schema.sql，幂等执行
 if [ -f /sqlite_schema.sql ]; then
   python manage.py shell -c "
