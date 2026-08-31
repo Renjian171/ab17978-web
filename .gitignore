@@ -11,3 +11,4 @@ venv/
 .idea/
 *.swp
 *.swo
+data_export.json
