@@ -186,6 +186,12 @@ DOWNLOAD_MANIFEST = {
         "desc": 'P. synxantha NCTC10696 基因组与注释数据集',
         "genus": 'Pseudomonas',
     },
+    'GTDB-Tk_Phylogenetic_Tree.zip': {
+        "size": '0.7K',
+        "date": "2026-08-31",
+        "desc": 'GTDB-Tk Phylogenetic Tree (Newick)',
+        "genus": 'Other',
+    },
 }
 
 # 与 download_links 的 FilesMatch 清单保持同步（管理员维护，勿自行扩大）
