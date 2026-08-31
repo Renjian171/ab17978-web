@@ -2,7 +2,8 @@ from django.contrib import admin
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
-from web.views import AntimicrobialPeptideViewSet, PromoterViewSet, OperonViewSet, SrnaStructureViewSet, genome_tree, genome_tree_newick, genome_list, download_list, download_file, genes_data, genes_search, genes_context, genes_region, blast_run, gene_structure, srna_structure_image, gene_dna_sequence, primer_design
+from web.views import AntimicrobialPeptideViewSet, PromoterViewSet, OperonViewSet, SrnaStructureViewSet, genome_tree, genome_tree_newick, genome_list, genes_data, genes_search, genes_context, genes_region, blast_run, gene_structure, srna_structure_image, gene_dna_sequence, primer_design
+from web.downloads import download_list, download_file
 
 router = DefaultRouter()
 router.register(r"antimicrobial-peptides", AntimicrobialPeptideViewSet)

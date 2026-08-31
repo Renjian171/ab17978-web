@@ -1,7 +1,6 @@
 import os
 import re
 import tempfile
-import mimetypes
 import subprocess
 from django.conf import settings
 from django.http import FileResponse, JsonResponse, HttpResponse
@@ -168,78 +167,6 @@ def genome_list(request):
     """Return genome statistics for all .fna files."""
     stats = get_all_genome_stats()
     return Response(stats)
-
-
-# ============================================================
-#  Download API endpoints
-# ============================================================
-
-@api_view(["GET"])
-def download_list(request):
-    """List all downloadable genome files with metadata."""
-    files = []
-    if not os.path.exists(GENOME_DB_PATH):
-        return Response(files)
-
-    for fname in sorted(os.listdir(GENOME_DB_PATH)):
-        fpath = os.path.join(GENOME_DB_PATH, fname)
-
-        if fname.endswith(".zip") and os.path.isfile(fpath):
-            stem = fname[:-4]
-            ext = "zip"
-            if stem.startswith("A. "):
-                genus = "Acinetobacter"
-            elif stem.startswith("P. "):
-                genus = "Pseudomonas"
-            else:
-                genus = "Other"
-            files.append({
-                "filename": fname,
-                "stem": stem,
-                "extension": ext,
-                "genus": genus,
-            })
-        elif os.path.isdir(fpath) and fname == "Phylogenetic_Tree":
-            for tf in sorted(os.listdir(fpath)):
-                if tf.endswith(".zip"):
-                    files.append({
-                        "filename": "Phylogenetic_Tree/" + tf,
-                        "stem": "GTDB-Tk Phylogenetic Tree (Newick)",
-                        "extension": "zip",
-                        "genus": "Other",
-                    })
-
-    return Response(files)
-
-
-@api_view(["GET"])
-def download_file(request):
-    """Download a specific genome file. Accepts ?file=<filename> query param."""
-    filename = request.GET.get("file", "").strip()
-    if not filename:
-        return JsonResponse({"error": "Missing 'file' parameter"}, status=400)
-
-    # 安全检查：防止路径遍历攻击 (Path Traversal)
-    fpath = os.path.join(GENOME_DB_PATH, filename.replace("/", os.sep))
-    fpath = os.path.realpath(fpath)
-    base_real = os.path.realpath(GENOME_DB_PATH) + os.sep
-    if not fpath.startswith(base_real):
-        return JsonResponse({"error": "Invalid filename"}, status=400)
-    
-    # 二级路径越界核查
-    real_path = os.path.realpath(fpath)
-    real_base = os.path.realpath(GENOME_DB_PATH)
-    if not real_path.startswith(real_base + os.sep) and real_path != real_base:
-        return JsonResponse({"error": "Access denied"}, status=400)
-
-    if not os.path.isfile(fpath):
-        return JsonResponse({"error": "File not found"}, status=404)
-
-    content_type, _ = mimetypes.guess_type(fpath)
-    response = FileResponse(open(fpath, "rb"), content_type=content_type or "application/octet-stream")
-    download_name = os.path.basename(fpath)
-    response["Content-Disposition"] = f'attachment; filename="{download_name}"'
-    return response
 
 
 # ============================================================
