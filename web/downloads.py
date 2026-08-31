@@ -11,7 +11,7 @@ import os
 import urllib.parse
 
 from django.http import HttpResponse, JsonResponse
-from django.views.decorators.http import require_GET
+from django.views.decorators.http import require_http_methods
 
 # 发布台账：每发布一个文件，在此登记一条。
 # 文件名必须与宿主机 /home/download/ab17978/ 内的文件完全一致（含大小写）。
@@ -28,14 +28,14 @@ DOWNLOAD_MANIFEST = {
 ALLOWED_EXT = {".zip"}
 
 
-@require_GET
+@require_http_methods(["GET", "HEAD"])
 def download_list(request):
     """① 列表 API：返回 JSON，前端据此渲染下载按钮"""
     files = [{"name": name, **meta} for name, meta in DOWNLOAD_MANIFEST.items()]
     return JsonResponse({"files": files})
 
 
-@require_GET
+@require_http_methods(["GET", "HEAD"])
 def download_file(request):
     """② 下载 API：三层校验后 302 到统一静态出口"""
     name = request.GET.get("file", "")
